@@ -4,12 +4,12 @@ const path = require("path");
 
 module.exports.config = {
   name: "pi",
-  version: "5.0.1",
+  version: "6.0.0",
   hasPermssion: 0,
   credits: "mahimvia",
-  description: "Advanced Together AI Q&A with all features",
+  description: "Together.ai chat with history, file send/read, dynamic models",
   commandCategory: "AI",
-  usages: ".pi <question> | .pi help | .pi model <name> | .pi lang <code> | .pi follow ... | .pi clearhistory",
+  usages: ".pi <question> | .pi models | .pi model <name> | .pi help | .pi read <filename>",
   cooldowns: 10
 };
 
@@ -18,71 +18,41 @@ const EMOJI = {
   success: "✅",
   error: "❌",
   info: "ℹ️",
-  blocked: "🚫",
-  timeout: "🕒",
-  ai: "🤖",
-  admin: "👑",
-  spam: "🛑",
-  rate: "⚡"
+  model: "🤖",
+  file: "📄",
+  history: "🗂️"
 };
 
-// Together AI settings
-const TOGETHER_API_URL = "https://api.together.xyz/v1/chat/completions";
+const TOGETHER_API_URL = "https://api.together.xyz/v1";
 const TOGETHER_API_KEY = "2aba4dc1d5295510a4b382cd0d1d2e6737a10ca565848738c95d3813bc16e87f";
-const DEFAULT_MODEL = "meta-llama/Llama-3-70B-Instruct";
-const ADVANCED_MODELS = [
-  "meta-llama/Llama-3-70B-Instruct",
-  "mistralai/Mixtral-8x22B-Instruct-v0.1",
-  "anthropic/claude-3-opus"
-];
+let defaultModel = "mistralai/Mixtral-8x7B-Instruct-v0.1";
+
 const LOGDIR = path.join(__dirname, "cache");
-const LOGFILE = path.join(LOGDIR, "pi_history.json");
-const ERRFILE = path.join(LOGDIR, "pi_error.log");
 const CONTEXTFILE = path.join(LOGDIR, "pi_context.json");
 const COOLDOWN = 10; // Seconds
 
+// Helper: set emoji reaction
 function react(api, emoji, msgid, threadid) {
   api.setMessageReaction(emoji, msgid, () => {}, true);
 }
 
-function isAdmin(senderID) {
-  const adminList = ["its.mahim.islam"]; // Your admin Facebook ID or username
-  return adminList.includes(senderID + "");
-}
-
+// Helper: cooldown check
 function checkCooldown(senderID, threadID) {
   if (!fs.existsSync(LOGDIR)) fs.mkdirSync(LOGDIR);
   let times = {};
-  if (fs.existsSync(path.join(LOGDIR, "pi_cooldown.json"))) {
-    times = JSON.parse(fs.readFileSync(path.join(LOGDIR, "pi_cooldown.json")));
+  const file = path.join(LOGDIR, "pi_cooldown.json");
+  if (fs.existsSync(file)) {
+    times = JSON.parse(fs.readFileSync(file));
   }
   const key = `${senderID}_${threadID}`;
   const now = Date.now();
   if (times[key] && now - times[key] < COOLDOWN * 1000) return false;
   times[key] = now;
-  fs.writeFileSync(path.join(LOGDIR, "pi_cooldown.json"), JSON.stringify(times));
+  fs.writeFileSync(file, JSON.stringify(times));
   return true;
 }
 
-function logError(...args) {
-  const msg = `[${new Date().toISOString()}] ` + args.join(" | ") + "\n";
-  fs.appendFileSync(ERRFILE, msg);
-}
-
-function logHistory(threadID, senderID, question, answer, opts={}) {
-  let logs = [];
-  if (fs.existsSync(LOGFILE)) {
-    try { logs = JSON.parse(fs.readFileSync(LOGFILE)); } catch { logs = []; }
-  }
-  logs.push({
-    threadID, senderID, question, answer,
-    model: opts.model || DEFAULT_MODEL,
-    lang: opts.lang || "en",
-    timestamp: Date.now()
-  });
-  fs.writeFileSync(LOGFILE, JSON.stringify(logs, null, 2));
-}
-
+// Helper: manage context (memory per thread)
 function getContext(threadID) {
   let ctx = {};
   if (fs.existsSync(CONTEXTFILE)) {
@@ -95,24 +65,23 @@ function setContext(threadID, history) {
   if (fs.existsSync(CONTEXTFILE)) {
     try { ctx = JSON.parse(fs.readFileSync(CONTEXTFILE)); } catch { ctx = {}; }
   }
-  ctx[threadID] = history;
+  ctx[threadID] = history.slice(-10); // Keep last 10 exchanges for context
   fs.writeFileSync(CONTEXTFILE, JSON.stringify(ctx, null, 2));
 }
 
-function getLangCode(str) {
-  if (/[\u0980-\u09FF]/.test(str)) return "bn";
-  if (/[\u0900-\u097F]/.test(str)) return "hi";
-  if (/[\u0400-\u04FF]/.test(str)) return "ru";
-  if (/[\u4e00-\u9fff]/.test(str)) return "zh";
-  if (/[\u3040-\u30ff]/.test(str)) return "ja";
-  return "en";
-}
-async function translateText(text, targetLang) {
-  return text; // Implement translation if needed
+// Helper: get available models from Together
+async function getAvailableModels() {
+  const res = await axios.get(`${TOGETHER_API_URL}/models`, {
+    headers: { "Authorization": `Bearer ${TOGETHER_API_KEY}` }
+  });
+  return res.data.data
+    .filter(m => m.name && (m.name.includes("Instruct") || m.name.includes("chat") || m.name.includes("GPT") || m.name.includes("llama")))
+    .map(m => m.name);
 }
 
-async function getAIAnswer(question, model = DEFAULT_MODEL, context = [], lang = "en") {
-  const url = TOGETHER_API_URL;
+// Helper: get AI answer from Together
+async function getAIAnswer(question, model, context = []) {
+  const url = `${TOGETHER_API_URL}/chat/completions`;
   const payload = {
     model,
     messages: [...context, { role: "user", content: question }],
@@ -124,138 +93,157 @@ async function getAIAnswer(question, model = DEFAULT_MODEL, context = [], lang =
     "Content-Type": "application/json"
   };
   const response = await axios.post(url, payload, { headers });
-  let answer = response.data.choices?.[0]?.message?.content || "No answer.";
-  if (lang !== "en") answer = await translateText(answer, lang);
-  return answer;
+  return response.data.choices?.[0]?.message?.content;
+}
+
+// Helper: list files sent in /cache
+function listFiles() {
+  if (!fs.existsSync(LOGDIR)) return [];
+  return fs.readdirSync(LOGDIR)
+    .filter(f => f.startsWith("pi_file_"))
+    .map(f => f.replace("pi_file_", ""));
+}
+
+// Helper: save file
+function saveAttachment(attachment, senderID) {
+  const ext = attachment.type === "photo" ? ".jpg"
+           : attachment.type === "video" ? ".mp4"
+           : attachment.type === "audio" ? ".mp3"
+           : attachment.type === "file" ? path.extname(attachment.name) || ".dat"
+           : ".dat";
+  const filename = attachment.name ? attachment.name : `file_${Date.now()}${ext}`;
+  const filePath = path.join(LOGDIR, `pi_file_${filename}`);
+  return axios.get(attachment.url, { responseType: "arraybuffer" }).then(res => {
+    fs.writeFileSync(filePath, Buffer.from(res.data, "binary"));
+    return filename;
+  });
+}
+
+// Helper: read file content (limited to text files)
+function readFileContent(filename) {
+  const filePath = path.join(LOGDIR, `pi_file_${filename}`);
+  if (!fs.existsSync(filePath)) return null;
+  const ext = path.extname(filename).toLowerCase();
+  if ([".txt", ".md", ".json", ".csv", ".log"].includes(ext)) {
+    return fs.readFileSync(filePath, "utf8").slice(0, 6000); // limit to 6kb
+  } else {
+    return null; // Only allow text files for direct reading
+  }
 }
 
 module.exports.run = async function({ api, event, args, Users }) {
   const { threadID, messageID, senderID, attachments } = event;
   let question = args.join(" ").trim();
-  let model = DEFAULT_MODEL;
-  let lang = "en";
   let context = getContext(threadID);
 
+  // Cooldown/anti-spam
   if (!checkCooldown(senderID, threadID)) {
-    api.sendMessage(`${EMOJI.spam} Please wait ${COOLDOWN}s before using .pi again.`, threadID, messageID);
-    react(api, EMOJI.spam, messageID, threadID);
+    api.sendMessage(`${EMOJI.error} Please wait ${COOLDOWN}s before using .pi again.`, threadID, messageID);
+    react(api, EMOJI.error, messageID, threadID);
     return;
   }
 
-  if (!question || question.toLowerCase() === "help") {
+  // Help
+  if (!question || /^help$/i.test(question)) {
     api.sendMessage(
-      `${EMOJI.info} Usage:
-.pi <question> — Ask any question.
-.pi help — See this help.
-.pi model <modelName> — Change the AI model (admin only for advanced models).
-.pi lang <code> — Change answer language (e.g., en, bn, hi).
-.pi follow <your follow-up> — Continue last chat in thread.
-.pi clearhistory — Clear chat history/context (admin only).
-
-Examples:
-.pi What is the capital of Japan?
-.pi What is shown in this image? (send with photo)
-.pi follow What about its population?
-Current default model: meta-llama/Llama-3-70B-Instruct
-`,
+      `${EMOJI.info} Usage:\n.pi <your question>\n.pi models (show Together models)\n.pi model <name> (set default model)\n.pi read <filename> (read file sent earlier)\nSend a file with your question to ask about it.\nCurrent default: ${defaultModel}\nAvailable files: ${listFiles().join(", ") || "(none)"}\n`,
       threadID, messageID
     );
     react(api, EMOJI.info, messageID, threadID);
     return;
   }
 
-  if (question.toLowerCase() === "clearhistory" && isAdmin(senderID)) {
-    if (fs.existsSync(LOGFILE)) fs.unlinkSync(LOGFILE);
-    if (fs.existsSync(CONTEXTFILE)) fs.unlinkSync(CONTEXTFILE);
-    api.sendMessage(`${EMOJI.admin} History cleared!`, threadID, messageID);
-    react(api, EMOJI.admin, messageID, threadID);
+  // Show models
+  if (/^models$/i.test(question)) {
+    try {
+      const models = await getAvailableModels();
+      api.sendMessage(
+        `${EMOJI.model} Together chat models:\n- ${models.join('\n- ')}\nCurrent default: ${defaultModel}`,
+        threadID, messageID
+      );
+      react(api, EMOJI.model, messageID, threadID);
+    } catch (err) {
+      api.sendMessage(`${EMOJI.error} Couldn't fetch models: ${err.message}`, threadID, messageID);
+      react(api, EMOJI.error, messageID, threadID);
+    }
     return;
   }
 
-  if (question.toLowerCase().startsWith("model ")) {
-    let reqModel = question.split(" ")[1];
-    if (ADVANCED_MODELS.includes(reqModel) && !isAdmin(senderID)) {
-      api.sendMessage(`${EMOJI.blocked} Only admins can use advanced models!`, threadID, messageID);
-      react(api, EMOJI.blocked, messageID, threadID);
+  // Set default model
+  if (/^model\s+([^\s]+)$/i.test(question)) {
+    const reqModel = question.match(/^model\s+([^\s]+)$/i)[1];
+    try {
+      const models = await getAvailableModels();
+      if (!models.includes(reqModel)) {
+        api.sendMessage(
+          `${EMOJI.error} Model '${reqModel}' not found!\nAvailable: ${models.join(', ')}`,
+          threadID, messageID
+        );
+        react(api, EMOJI.error, messageID, threadID);
+        return;
+      }
+      defaultModel = reqModel;
+      api.sendMessage(`${EMOJI.model} Default model set to: ${defaultModel}`, threadID, messageID);
+      react(api, EMOJI.model, messageID, threadID);
+    } catch (err) {
+      api.sendMessage(`${EMOJI.error} Couldn't set model: ${err.message}`, threadID, messageID);
+      react(api, EMOJI.error, messageID, threadID);
+    }
+    return;
+  }
+
+  // Read a file
+  if (/^read\s+([^\s]+)$/i.test(question)) {
+    const filename = question.match(/^read\s+([^\s]+)$/i)[1];
+    const content = readFileContent(filename);
+    if (!content) {
+      api.sendMessage(`${EMOJI.error} File not found or not a text file: ${filename}`, threadID, messageID);
+      react(api, EMOJI.error, messageID, threadID);
       return;
     }
-    model = reqModel || DEFAULT_MODEL;
-    api.sendMessage(`${EMOJI.ai} Model set to ${model}`, threadID, messageID);
-    react(api, EMOJI.ai, messageID, threadID);
+    api.sendMessage(`${EMOJI.file} Contents of ${filename}:\n\n${content}`, threadID, messageID);
+    react(api, EMOJI.file, messageID, threadID);
     return;
   }
 
-  if (question.toLowerCase().startsWith("lang ")) {
-    lang = question.split(" ")[1] || "en";
-    api.sendMessage(`${EMOJI.info} Response language set to ${lang}`, threadID, messageID);
-    react(api, EMOJI.info, messageID, threadID);
-    return;
+  // File send: if there's an attachment, save and add info for AI
+  let fileInfo = "";
+  if (attachments && attachments.length > 0) {
+    try {
+      const filename = await saveAttachment(attachments[0], senderID);
+      fileInfo = `\n[File received: ${filename}]`;
+      // If text file, read content for context
+      const fileText = readFileContent(filename);
+      if (fileText) {
+        question += `\n\nHere's the file "${filename}":\n${fileText}`;
+      } else {
+        question += `\n\nA non-text file "${filename}" was sent.`;
+      }
+      api.sendMessage(`${EMOJI.file} File received: ${filename}`, threadID, messageID);
+    } catch (err) {
+      api.sendMessage(`${EMOJI.error} Couldn't save your file: ${err.message}`, threadID, messageID);
+      react(api, EMOJI.error, messageID, threadID);
+      return;
+    }
   }
 
-  if (question.toLowerCase().startsWith("follow ")) {
-    question = question.replace(/^follow\s+/i, "");
-    // Context already loaded
-  }
-
+  // Start loading reaction
   react(api, EMOJI.loading, messageID, threadID);
 
-  let attachmentPath = null;
-  let attachmentType = null;
-  let attachmentCaption = "";
-  if (attachments && attachments.length > 0) {
-    const att = attachments[0];
-    attachmentType = att.type;
-    const attUrl = att.url;
-    const ext = att.type === "photo" ? ".jpg"
-              : att.type === "video" ? ".mp4"
-              : att.type === "audio" ? ".mp3"
-              : att.type === "file" ? path.extname(att.name) || ".dat"
-              : ".dat";
-    attachmentPath = path.join(LOGDIR, `pi_${senderID}_${Date.now()}${ext}`);
-    try {
-      const res = await axios.get(attUrl, { responseType: "arraybuffer" });
-      fs.writeFileSync(attachmentPath, Buffer.from(res.data, "binary"));
-      attachmentCaption = att.name ? `Attachment: ${att.name}` : `Attachment of type ${attachmentType}`;
-    } catch (err) {
-      api.sendMessage(`${EMOJI.error} Error downloading your file. Try again.`, threadID, messageID);
-      react(api, EMOJI.error, messageID, threadID);
-      logError("Attachment download", err.message || err.toString());
-      return;
-    }
-  }
-
-  let userName = "User";
-  if (Users && typeof Users.getName === "function") {
-    try { userName = await Users.getName(senderID); } catch {}
-  }
-
-  if (lang === "auto") lang = getLangCode(question);
-
-  let fullQuestion = `[${userName}] asks: ${question}`;
-  if (attachmentType) fullQuestion += `\n[${attachmentCaption}]`;
-
+  // Ask AI
   try {
-    const aiReply = await getAIAnswer(fullQuestion, model, context, lang);
-
-    let finalReply = aiReply;
-    if (finalReply.length > 4000) finalReply = finalReply.slice(0, 3997) + "...";
-
-    let msgObj = { body: `${EMOJI.success} ${finalReply}` };
-    if (attachmentPath && fs.existsSync(attachmentPath)) {
-      msgObj.attachment = fs.createReadStream(attachmentPath);
-    }
-    api.sendMessage(msgObj, threadID, (err, info) => {
+    const aiReply = await getAIAnswer(question, defaultModel, context);
+    api.sendMessage(`${EMOJI.success} ${aiReply || "No answer."}`, threadID, (err, info) => {
       if (!err && info) react(api, EMOJI.success, info.messageID, threadID);
-      logHistory(threadID, senderID, question, finalReply, { model, lang });
-      setContext(threadID, [...context, { role: "user", content: question }, { role: "assistant", content: finalReply }]);
+      // Update context/history for this thread
+      setContext(threadID, [
+        ...context,
+        { role: "user", content: question },
+        { role: "assistant", content: aiReply }
+      ]);
     });
-
   } catch (err) {
-    let errMsg = (err.response?.data?.error?.message) || err.message || "Unknown";
-    let emoji = EMOJI.error;
-    if (/rate/i.test(errMsg)) emoji = EMOJI.rate;
-    api.sendMessage(`${emoji} Error communicating with Together AI: ${errMsg}`, threadID, messageID);
-    react(api, emoji, messageID, threadID);
-    logError("AI error", errMsg);
+    api.sendMessage(`${EMOJI.error} Error: ${err.response?.data?.error || err.message}`, threadID, messageID);
+    react(api, EMOJI.error, messageID, threadID);
   }
 };
