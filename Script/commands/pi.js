@@ -4,10 +4,10 @@ const path = require("path");
 
 module.exports.config = {
   name: "pi",
-  version: "4.0.2",
+  version: "5.0.1",
   hasPermssion: 0,
   credits: "mahimvia",
-  description: "Advanced ChatGPT-like Q&A with multi-feature support",
+  description: "Advanced Together AI Q&A with all features",
   commandCategory: "AI",
   usages: ".pi <question> | .pi help | .pi model <name> | .pi lang <code> | .pi follow ... | .pi clearhistory",
   cooldowns: 10
@@ -26,17 +26,14 @@ const EMOJI = {
   rate: "⚡"
 };
 
-const OPENROUTER_API_KEY = "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"; // Replace!
-/**
- * Default model set to the best currently available on OpenRouter:
- * anthropic/claude-3-opus (as of 2024, best for general chat and reasoning)
- * You can change this if a newer/better model is released.
- */
-const DEFAULT_MODEL = "anthropic/claude-3-opus";
+// Together AI settings
+const TOGETHER_API_URL = "https://api.together.xyz/v1/chat/completions";
+const TOGETHER_API_KEY = "2aba4dc1d5295510a4b382cd0d1d2e6737a10ca565848738c95d3813bc16e87f";
+const DEFAULT_MODEL = "meta-llama/Llama-3-70B-Instruct";
 const ADVANCED_MODELS = [
-  "openai/gpt-4-turbo",
-  "anthropic/claude-3-opus",
-  "google/gemini-pro"
+  "meta-llama/Llama-3-70B-Instruct",
+  "mistralai/Mixtral-8x22B-Instruct-v0.1",
+  "anthropic/claude-3-opus"
 ];
 const LOGDIR = path.join(__dirname, "cache");
 const LOGFILE = path.join(LOGDIR, "pi_history.json");
@@ -44,18 +41,15 @@ const ERRFILE = path.join(LOGDIR, "pi_error.log");
 const CONTEXTFILE = path.join(LOGDIR, "pi_context.json");
 const COOLDOWN = 10; // Seconds
 
-// Helper: set emoji reaction
 function react(api, emoji, msgid, threadid) {
   api.setMessageReaction(emoji, msgid, () => {}, true);
 }
 
-// Helper: get admin status (customize as needed)
 function isAdmin(senderID) {
-  const adminList = ["100088769563815"]; // Add admin IDs here
+  const adminList = ["its.mahim.islam"]; // Your admin Facebook ID or username
   return adminList.includes(senderID + "");
 }
 
-// Helper: cooldown check
 function checkCooldown(senderID, threadID) {
   if (!fs.existsSync(LOGDIR)) fs.mkdirSync(LOGDIR);
   let times = {};
@@ -70,13 +64,11 @@ function checkCooldown(senderID, threadID) {
   return true;
 }
 
-// Helper: log error
 function logError(...args) {
   const msg = `[${new Date().toISOString()}] ` + args.join(" | ") + "\n";
   fs.appendFileSync(ERRFILE, msg);
 }
 
-// Helper: log history
 function logHistory(threadID, senderID, question, answer, opts={}) {
   let logs = [];
   if (fs.existsSync(LOGFILE)) {
@@ -91,7 +83,6 @@ function logHistory(threadID, senderID, question, answer, opts={}) {
   fs.writeFileSync(LOGFILE, JSON.stringify(logs, null, 2));
 }
 
-// Helper: manage context (memory per thread)
 function getContext(threadID) {
   let ctx = {};
   if (fs.existsSync(CONTEXTFILE)) {
@@ -108,7 +99,6 @@ function setContext(threadID, history) {
   fs.writeFileSync(CONTEXTFILE, JSON.stringify(ctx, null, 2));
 }
 
-// Helper: language detection (expand as needed)
 function getLangCode(str) {
   if (/[\u0980-\u09FF]/.test(str)) return "bn";
   if (/[\u0900-\u097F]/.test(str)) return "hi";
@@ -117,25 +107,20 @@ function getLangCode(str) {
   if (/[\u3040-\u30ff]/.test(str)) return "ja";
   return "en";
 }
-
-// Helper: translate answer (Google Translate API or similar)
 async function translateText(text, targetLang) {
-  // Dummy: returns same text. Implement your translation logic here!
-  return text;
+  return text; // Implement translation if needed
 }
 
-// Helper: get AI answer
-async function getAIAnswer(question, apiKey, model = DEFAULT_MODEL, context = [], lang = "en") {
-  const url = "https://openrouter.ai/api/v1/chat/completions";
-  const messages = [...context, { role: "user", content: question }];
+async function getAIAnswer(question, model = DEFAULT_MODEL, context = [], lang = "en") {
+  const url = TOGETHER_API_URL;
   const payload = {
     model,
-    messages,
+    messages: [...context, { role: "user", content: question }],
     max_tokens: 1024,
     temperature: 0.7
   };
   const headers = {
-    "Authorization": `Bearer ${apiKey}`,
+    "Authorization": `Bearer ${TOGETHER_API_KEY}`,
     "Content-Type": "application/json"
   };
   const response = await axios.post(url, payload, { headers });
@@ -151,24 +136,34 @@ module.exports.run = async function({ api, event, args, Users }) {
   let lang = "en";
   let context = getContext(threadID);
 
-  // Cooldown/anti-spam
   if (!checkCooldown(senderID, threadID)) {
     api.sendMessage(`${EMOJI.spam} Please wait ${COOLDOWN}s before using .pi again.`, threadID, messageID);
     react(api, EMOJI.spam, messageID, threadID);
     return;
   }
 
-  // Usage Help
   if (!question || question.toLowerCase() === "help") {
     api.sendMessage(
-      `${EMOJI.info} Usage: .pi <your question>\nOptions:\n- .pi model <modelName> (admin)\n- .pi lang <code> (change response language)\n- .pi follow <your follow-up> (continue last chat)\n- .pi clearhistory (admin)\nExample: .pi What is the capital of Japan?\nBest default model: anthropic/claude-3-opus\n`,
+      `${EMOJI.info} Usage:
+.pi <question> — Ask any question.
+.pi help — See this help.
+.pi model <modelName> — Change the AI model (admin only for advanced models).
+.pi lang <code> — Change answer language (e.g., en, bn, hi).
+.pi follow <your follow-up> — Continue last chat in thread.
+.pi clearhistory — Clear chat history/context (admin only).
+
+Examples:
+.pi What is the capital of Japan?
+.pi What is shown in this image? (send with photo)
+.pi follow What about its population?
+Current default model: meta-llama/Llama-3-70B-Instruct
+`,
       threadID, messageID
     );
     react(api, EMOJI.info, messageID, threadID);
     return;
   }
 
-  // Admin: clear history
   if (question.toLowerCase() === "clearhistory" && isAdmin(senderID)) {
     if (fs.existsSync(LOGFILE)) fs.unlinkSync(LOGFILE);
     if (fs.existsSync(CONTEXTFILE)) fs.unlinkSync(CONTEXTFILE);
@@ -177,7 +172,6 @@ module.exports.run = async function({ api, event, args, Users }) {
     return;
   }
 
-  // Model selection
   if (question.toLowerCase().startsWith("model ")) {
     let reqModel = question.split(" ")[1];
     if (ADVANCED_MODELS.includes(reqModel) && !isAdmin(senderID)) {
@@ -191,7 +185,6 @@ module.exports.run = async function({ api, event, args, Users }) {
     return;
   }
 
-  // Language selection
   if (question.toLowerCase().startsWith("lang ")) {
     lang = question.split(" ")[1] || "en";
     api.sendMessage(`${EMOJI.info} Response language set to ${lang}`, threadID, messageID);
@@ -199,16 +192,13 @@ module.exports.run = async function({ api, event, args, Users }) {
     return;
   }
 
-  // Follow-up
   if (question.toLowerCase().startsWith("follow ")) {
     question = question.replace(/^follow\s+/i, "");
     // Context already loaded
   }
 
-  // Start loading reaction
   react(api, EMOJI.loading, messageID, threadID);
 
-  // Handle attachment
   let attachmentPath = null;
   let attachmentType = null;
   let attachmentCaption = "";
@@ -234,23 +224,19 @@ module.exports.run = async function({ api, event, args, Users }) {
     }
   }
 
-  // Get user name
   let userName = "User";
   if (Users && typeof Users.getName === "function") {
     try { userName = await Users.getName(senderID); } catch {}
   }
 
-  // Language auto-detection
   if (lang === "auto") lang = getLangCode(question);
 
-  // AI prompt
   let fullQuestion = `[${userName}] asks: ${question}`;
   if (attachmentType) fullQuestion += `\n[${attachmentCaption}]`;
 
   try {
-    const aiReply = await getAIAnswer(fullQuestion, OPENROUTER_API_KEY, model, context, lang);
+    const aiReply = await getAIAnswer(fullQuestion, model, context, lang);
 
-    // Limit answer length
     let finalReply = aiReply;
     if (finalReply.length > 4000) finalReply = finalReply.slice(0, 3997) + "...";
 
@@ -261,7 +247,6 @@ module.exports.run = async function({ api, event, args, Users }) {
     api.sendMessage(msgObj, threadID, (err, info) => {
       if (!err && info) react(api, EMOJI.success, info.messageID, threadID);
       logHistory(threadID, senderID, question, finalReply, { model, lang });
-      // Save new context
       setContext(threadID, [...context, { role: "user", content: question }, { role: "assistant", content: finalReply }]);
     });
 
@@ -269,7 +254,7 @@ module.exports.run = async function({ api, event, args, Users }) {
     let errMsg = (err.response?.data?.error?.message) || err.message || "Unknown";
     let emoji = EMOJI.error;
     if (/rate/i.test(errMsg)) emoji = EMOJI.rate;
-    api.sendMessage(`${emoji} Error communicating with AI: ${errMsg}`, threadID, messageID);
+    api.sendMessage(`${emoji} Error communicating with Together AI: ${errMsg}`, threadID, messageID);
     react(api, emoji, messageID, threadID);
     logError("AI error", errMsg);
   }
