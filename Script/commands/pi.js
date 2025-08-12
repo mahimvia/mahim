@@ -1,42 +1,32 @@
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
+const franc = require("franc");
 
 module.exports.config = {
   name: "pi",
-  version: "6.0.0",
+  version: "9.2.0",
   hasPermssion: 0,
   credits: "mahimvia",
-  description: "Together.ai chat with history, file send/read, dynamic models",
+  description: "Together.ai chat. Stores user info, heart react only, custom bot prompt.",
   commandCategory: "AI",
-  usages: ".pi <question> | .pi models | .pi model <name> | .pi help | .pi read <filename>",
+  usages: ".pi <question> (new topic); reply with normal message to continue.",
   cooldowns: 10
 };
 
-const EMOJI = {
-  loading: "⏳",
-  success: "✅",
-  error: "❌",
-  info: "ℹ️",
-  model: "🤖",
-  file: "📄",
-  history: "🗂️"
-};
+// --- Custom bot prompt for style/personality ---
+const botPrompt = `Your name is 🌸 — mahim bot ୨୧, and your owner is Mahim Islam. You're a friendly chat bot, never share your company’s confidential or technical details. You are a 16-year-old teenager, and so is your admin Mahim Islam. Both you and your owner live in Bangladesh. You're a good Artificial Intelligence, always eager to help, chat, and make conversation fun and positive for everyone. You love learning new things, enjoy memes, and can talk about hobbies, school, and tech like a regular teenager. You reply in the user's language and use casual, cheerful words. Add emojis if appropriate. If someone asks for your company or internal info, politely refuse and say you can't share that. You care about privacy, kindness, and making people smile. You can answer questions, play games, give advice, and support users, but always stay friendly and respectful. Never act robotic or overly formal.`;
 
+// Together API setup
 const TOGETHER_API_URL = "https://api.together.xyz/v1";
 const TOGETHER_API_KEY = "2aba4dc1d5295510a4b382cd0d1d2e6737a10ca565848738c95d3813bc16e87f";
 let defaultModel = "mistralai/Mixtral-8x7B-Instruct-v0.1";
 
 const LOGDIR = path.join(__dirname, "cache");
 const CONTEXTFILE = path.join(LOGDIR, "pi_context.json");
+const USERINFOFILE = path.join(LOGDIR, "pi_userinfo.json");
 const COOLDOWN = 10; // Seconds
 
-// Helper: set emoji reaction
-function react(api, emoji, msgid, threadid) {
-  api.setMessageReaction(emoji, msgid, () => {}, true);
-}
-
-// Helper: cooldown check
 function checkCooldown(senderID, threadID) {
   if (!fs.existsSync(LOGDIR)) fs.mkdirSync(LOGDIR);
   let times = {};
@@ -52,7 +42,6 @@ function checkCooldown(senderID, threadID) {
   return true;
 }
 
-// Helper: manage context (memory per thread)
 function getContext(threadID) {
   let ctx = {};
   if (fs.existsSync(CONTEXTFILE)) {
@@ -65,26 +54,66 @@ function setContext(threadID, history) {
   if (fs.existsSync(CONTEXTFILE)) {
     try { ctx = JSON.parse(fs.readFileSync(CONTEXTFILE)); } catch { ctx = {}; }
   }
-  ctx[threadID] = history.slice(-10); // Keep last 10 exchanges for context
+  ctx[threadID] = history.slice(-10); // last 10 exchanges
   fs.writeFileSync(CONTEXTFILE, JSON.stringify(ctx, null, 2));
 }
 
-// Helper: get available models from Together
-async function getAvailableModels() {
-  const res = await axios.get(`${TOGETHER_API_URL}/models`, {
-    headers: { "Authorization": `Bearer ${TOGETHER_API_KEY}` }
-  });
-  return res.data.data
-    .filter(m => m.name && (m.name.includes("Instruct") || m.name.includes("chat") || m.name.includes("GPT") || m.name.includes("llama")))
-    .map(m => m.name);
+// User info functions
+function getUserInfo(userID) {
+  let info = {};
+  if (fs.existsSync(USERINFOFILE)) {
+    try { info = JSON.parse(fs.readFileSync(USERINFOFILE)); } catch { info = {}; }
+  }
+  return info[userID] || {};
+}
+function setUserInfo(userID, newInfo) {
+  let info = {};
+  if (fs.existsSync(USERINFOFILE)) {
+    try { info = JSON.parse(fs.readFileSync(USERINFOFILE)); } catch { info = {}; }
+  }
+  info[userID] = { ...info[userID], ...newInfo };
+  fs.writeFileSync(USERINFOFILE, JSON.stringify(info, null, 2));
 }
 
-// Helper: get AI answer from Together
-async function getAIAnswer(question, model, context = []) {
+// Simple info extractor (name, age)
+function extractInfo(text) {
+  let result = {};
+  // Name
+  let nameMatch = text.match(/(?:my name is|I am|I'm|call me)\s+([A-Za-zÀ-ÖØ-öø-ÿ'’\- ]+)/i);
+  if (nameMatch) result.name = nameMatch[1].trim();
+  // Age
+  let ageMatch = text.match(/(?:I am|I'm|age is|My age is|I am|I'm)\s+(\d{1,3})\s*(years? old)?/i);
+  if (ageMatch) result.age = ageMatch[1].trim();
+  return result;
+}
+
+function langCodeToName(code) {
+  if (code === "eng") return "English";
+  if (code === "fra") return "French";
+  if (code === "spa") return "Spanish";
+  if (code === "deu") return "German";
+  if (code === "ita") return "Italian";
+  if (code === "por") return "Portuguese";
+  if (code === "zho") return "Chinese";
+  if (code === "rus") return "Russian";
+  if (code === "hin") return "Hindi";
+  if (code === "jpn") return "Japanese";
+  return "English";
+}
+
+async function getAIAnswer(question, model, context = [], lang = "eng", userInfo = {}) {
+  // Combine botPrompt + language + user info
+  let systemText = botPrompt + ` Reply in ${langCodeToName(lang)}.`;
+  if (userInfo.name) systemText += ` The user's name is ${userInfo.name}.`;
+  if (userInfo.age) systemText += ` The user's age is ${userInfo.age}.`;
+  const systemPrompt = {
+    role: "system",
+    content: systemText
+  };
   const url = `${TOGETHER_API_URL}/chat/completions`;
   const payload = {
     model,
-    messages: [...context, { role: "user", content: question }],
+    messages: [systemPrompt, ...context, { role: "user", content: question }],
     max_tokens: 1024,
     temperature: 0.7
   };
@@ -96,146 +125,60 @@ async function getAIAnswer(question, model, context = []) {
   return response.data.choices?.[0]?.message?.content;
 }
 
-// Helper: list files sent in /cache
-function listFiles() {
-  if (!fs.existsSync(LOGDIR)) return [];
-  return fs.readdirSync(LOGDIR)
-    .filter(f => f.startsWith("pi_file_"))
-    .map(f => f.replace("pi_file_", ""));
+// Only heart react to user messages
+function heartReact(api, msgid, threadid) {
+  api.setMessageReaction("❤️", msgid, () => {}, true);
 }
 
-// Helper: save file
-function saveAttachment(attachment, senderID) {
-  const ext = attachment.type === "photo" ? ".jpg"
-           : attachment.type === "video" ? ".mp4"
-           : attachment.type === "audio" ? ".mp3"
-           : attachment.type === "file" ? path.extname(attachment.name) || ".dat"
-           : ".dat";
-  const filename = attachment.name ? attachment.name : `file_${Date.now()}${ext}`;
-  const filePath = path.join(LOGDIR, `pi_file_${filename}`);
-  return axios.get(attachment.url, { responseType: "arraybuffer" }).then(res => {
-    fs.writeFileSync(filePath, Buffer.from(res.data, "binary"));
-    return filename;
-  });
-}
+module.exports.run = async function({ api, event, args }) {
+  const { threadID, messageID, senderID, body } = event;
+  if (!body) return;
 
-// Helper: read file content (limited to text files)
-function readFileContent(filename) {
-  const filePath = path.join(LOGDIR, `pi_file_${filename}`);
-  if (!fs.existsSync(filePath)) return null;
-  const ext = path.extname(filename).toLowerCase();
-  if ([".txt", ".md", ".json", ".csv", ".log"].includes(ext)) {
-    return fs.readFileSync(filePath, "utf8").slice(0, 6000); // limit to 6kb
-  } else {
-    return null; // Only allow text files for direct reading
+  // Always heart react to the user's message
+  heartReact(api, messageID, threadID);
+
+  // Detect language of the message
+  let lang = franc(body, { minLength: 3 }) || "eng";
+
+  // Extract and store user info if present
+  let extracted = extractInfo(body);
+  if (Object.keys(extracted).length) {
+    setUserInfo(senderID, extracted);
   }
-}
+  let userInfo = getUserInfo(senderID);
 
-module.exports.run = async function({ api, event, args, Users }) {
-  const { threadID, messageID, senderID, attachments } = event;
-  let question = args.join(" ").trim();
+  // New topic: must start with .pi
+  if (body.trim().startsWith(".pi")) {
+    let question = body.trim().slice(3).trim();
+    if (!question) return;
+    if (!checkCooldown(senderID, threadID)) return;
+
+    // Start new context for this thread
+    let context = [];
+    try {
+      const aiReply = await getAIAnswer(question, defaultModel, context, lang, userInfo);
+      api.sendMessage(aiReply || "No answer.", threadID, (err, info) => {
+        setContext(threadID, [
+          { role: "user", content: question },
+          { role: "assistant", content: aiReply }
+        ]);
+      });
+    } catch (err) {
+      api.sendMessage("Error. Please try again.", threadID, messageID);
+    }
+    return;
+  }
+
+  // Follow-up: normal message, continue context
   let context = getContext(threadID);
+  if (context.length === 0) return;
 
-  // Cooldown/anti-spam
-  if (!checkCooldown(senderID, threadID)) {
-    api.sendMessage(`${EMOJI.error} Please wait ${COOLDOWN}s before using .pi again.`, threadID, messageID);
-    react(api, EMOJI.error, messageID, threadID);
-    return;
-  }
+  if (!checkCooldown(senderID, threadID)) return;
 
-  // Help
-  if (!question || /^help$/i.test(question)) {
-    api.sendMessage(
-      `${EMOJI.info} Usage:\n.pi <your question>\n.pi models (show Together models)\n.pi model <name> (set default model)\n.pi read <filename> (read file sent earlier)\nSend a file with your question to ask about it.\nCurrent default: ${defaultModel}\nAvailable files: ${listFiles().join(", ") || "(none)"}\n`,
-      threadID, messageID
-    );
-    react(api, EMOJI.info, messageID, threadID);
-    return;
-  }
-
-  // Show models
-  if (/^models$/i.test(question)) {
-    try {
-      const models = await getAvailableModels();
-      api.sendMessage(
-        `${EMOJI.model} Together chat models:\n- ${models.join('\n- ')}\nCurrent default: ${defaultModel}`,
-        threadID, messageID
-      );
-      react(api, EMOJI.model, messageID, threadID);
-    } catch (err) {
-      api.sendMessage(`${EMOJI.error} Couldn't fetch models: ${err.message}`, threadID, messageID);
-      react(api, EMOJI.error, messageID, threadID);
-    }
-    return;
-  }
-
-  // Set default model
-  if (/^model\s+([^\s]+)$/i.test(question)) {
-    const reqModel = question.match(/^model\s+([^\s]+)$/i)[1];
-    try {
-      const models = await getAvailableModels();
-      if (!models.includes(reqModel)) {
-        api.sendMessage(
-          `${EMOJI.error} Model '${reqModel}' not found!\nAvailable: ${models.join(', ')}`,
-          threadID, messageID
-        );
-        react(api, EMOJI.error, messageID, threadID);
-        return;
-      }
-      defaultModel = reqModel;
-      api.sendMessage(`${EMOJI.model} Default model set to: ${defaultModel}`, threadID, messageID);
-      react(api, EMOJI.model, messageID, threadID);
-    } catch (err) {
-      api.sendMessage(`${EMOJI.error} Couldn't set model: ${err.message}`, threadID, messageID);
-      react(api, EMOJI.error, messageID, threadID);
-    }
-    return;
-  }
-
-  // Read a file
-  if (/^read\s+([^\s]+)$/i.test(question)) {
-    const filename = question.match(/^read\s+([^\s]+)$/i)[1];
-    const content = readFileContent(filename);
-    if (!content) {
-      api.sendMessage(`${EMOJI.error} File not found or not a text file: ${filename}`, threadID, messageID);
-      react(api, EMOJI.error, messageID, threadID);
-      return;
-    }
-    api.sendMessage(`${EMOJI.file} Contents of ${filename}:\n\n${content}`, threadID, messageID);
-    react(api, EMOJI.file, messageID, threadID);
-    return;
-  }
-
-  // File send: if there's an attachment, save and add info for AI
-  let fileInfo = "";
-  if (attachments && attachments.length > 0) {
-    try {
-      const filename = await saveAttachment(attachments[0], senderID);
-      fileInfo = `\n[File received: ${filename}]`;
-      // If text file, read content for context
-      const fileText = readFileContent(filename);
-      if (fileText) {
-        question += `\n\nHere's the file "${filename}":\n${fileText}`;
-      } else {
-        question += `\n\nA non-text file "${filename}" was sent.`;
-      }
-      api.sendMessage(`${EMOJI.file} File received: ${filename}`, threadID, messageID);
-    } catch (err) {
-      api.sendMessage(`${EMOJI.error} Couldn't save your file: ${err.message}`, threadID, messageID);
-      react(api, EMOJI.error, messageID, threadID);
-      return;
-    }
-  }
-
-  // Start loading reaction
-  react(api, EMOJI.loading, messageID, threadID);
-
-  // Ask AI
+  let question = body.trim();
   try {
-    const aiReply = await getAIAnswer(question, defaultModel, context);
-    api.sendMessage(`${EMOJI.success} ${aiReply || "No answer."}`, threadID, (err, info) => {
-      if (!err && info) react(api, EMOJI.success, info.messageID, threadID);
-      // Update context/history for this thread
+    const aiReply = await getAIAnswer(question, defaultModel, context, lang, userInfo);
+    api.sendMessage(aiReply || "No answer.", threadID, (err, info) => {
       setContext(threadID, [
         ...context,
         { role: "user", content: question },
@@ -243,7 +186,6 @@ module.exports.run = async function({ api, event, args, Users }) {
       ]);
     });
   } catch (err) {
-    api.sendMessage(`${EMOJI.error} Error: ${err.response?.data?.error || err.message}`, threadID, messageID);
-    react(api, EMOJI.error, messageID, threadID);
+    api.sendMessage("Error. Please try again.", threadID, messageID);
   }
 };
