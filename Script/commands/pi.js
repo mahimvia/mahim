@@ -1,169 +1,123 @@
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
-const franc = require("franc");
+
+const CONTEXT_FILE = path.join(__dirname, "cache", "pi_context.json");
+let contextStore = {};
+if (fs.existsSync(CONTEXT_FILE)) {
+  contextStore = fs.readJsonSync(CONTEXT_FILE);
+}
+function saveContext() {
+  fs.writeJsonSync(CONTEXT_FILE, contextStore);
+}
+function getContext(threadID, userID) {
+  const key = `${threadID}_${userID}`;
+  return contextStore[key] || [];
+}
+function updateContext(threadID, userID, userMsg, botMsg) {
+  const key = `${threadID}_${userID}`;
+  if (!contextStore[key]) contextStore[key] = [];
+  contextStore[key].push({ user: userMsg, bot: botMsg });
+  contextStore[key] = contextStore[key].slice(-5);
+  saveContext();
+}
+function detectLanguage(text) {
+  const langCode = franc(text, { minLength: 3 });
+  if (langCode === "und") return "en";
+  try {
+    const lang = langs.where("3", langCode);
+    return lang["1"];
+  } catch {
+    return "en";
+  }
+}
 
 module.exports.config = {
   name: "pi",
-  version: "9.2.0",
+  version: "2.0.0",
   hasPermssion: 0,
-  credits: "mahimvia",
-  description: "Together.ai chat. Stores user info, heart react only, custom bot prompt.",
-  commandCategory: "AI",
-  usages: ".pi <question> (new topic); reply with normal message to continue.",
-  cooldowns: 10
+  credits: "mahimvia, Mahim Islam",
+  description: "🌸 — mahim bot ୨୧ | Chat with AI (Together.xyz, memory, language, persona, emoji)",
+  commandCategory: "AI Chat",
+  usages: "[your question]",
+  cooldowns: 5
 };
 
-const botPrompt = `Your name is 🌸 — mahim bot ୨୧, and your owner is Mahim Islam. You're a friendly chat bot, never share your company’s confidential or technical details. You are a 16-year-old helpful assistant.`;
+const customPrompt = `
+Your boss is Mahim Islam. Your name is 🌸 — mahim bot ୨୧.
+You are a friendly, helpful AI assistant for Messenger. Always try to remember the user's name and previous conversation details.
+You answer questions, solve problems, and make conversation warm and cheerful. Greet people, sometimes use emojis.
+If the user specifies a language, reply in that language. Always react to user messages with a cherry emoji.
+`;
 
-const TOGETHER_API_URL = "https://api.together.xyz/v1";
-const TOGETHER_API_KEY = process.env.TOGETHER_API_KEY || "2aba4dc1d5295510a4b382cd0d1d2e6737a10ca565848738c95d3813bc16e87f";
-let defaultModel = "mistralai/Mixtral-8x7B-Instruct-v0.1";
+module.exports.run = async function({ api, event, args, Users }) {
+  let userMsg = args.join(" ").trim();
+  const threadID = event.threadID;
+  const userID = event.senderID;
+  const userInfo = await Users.getData(userID) || {};
+  const userName = userInfo.name || "User";
 
-const LOGDIR = path.join(__dirname, "cache");
-const CONTEXTFILE = path.join(LOGDIR, "pi_context.json");
-const USERINFOFILE = path.join(LOGDIR, "pi_userinfo.json");
-const COOLDOWN = 10; // Seconds
-
-function checkCooldown(senderID, threadID) {
-  if (!fs.existsSync(LOGDIR)) fs.mkdirSync(LOGDIR);
-  let times = {};
-  const file = path.join(LOGDIR, "pi_cooldown.json");
-  if (fs.existsSync(file)) {
-    times = JSON.parse(fs.readFileSync(file));
-  }
-  const key = `${senderID}_${threadID}`;
-  const now = Date.now();
-  if (times[key] && now - times[key] < COOLDOWN * 1000) return false;
-  times[key] = now;
-  fs.writeFileSync(file, JSON.stringify(times));
-  return true;
-}
-
-function getContext(threadID) {
-  let ctx = {};
-  if (fs.existsSync(CONTEXTFILE)) {
-    try { ctx = JSON.parse(fs.readFileSync(CONTEXTFILE)); } catch { ctx = {}; }
-  }
-  return ctx[threadID] || [];
-}
-function setContext(threadID, history) {
-  let ctx = {};
-  if (fs.existsSync(CONTEXTFILE)) {
-    try { ctx = JSON.parse(fs.readFileSync(CONTEXTFILE)); } catch { ctx = {}; }
-  }
-  ctx[threadID] = history.slice(-10); // last 10 exchanges
-  fs.writeFileSync(CONTEXTFILE, JSON.stringify(ctx, null, 2));
-}
-
-function getUserInfo(userID) {
-  let info = {};
-  if (fs.existsSync(USERINFOFILE)) {
-    try { info = JSON.parse(fs.readFileSync(USERINFOFILE)); } catch { info = {}; }
-  }
-  return info[userID] || {};
-}
-function setUserInfo(userID, newInfo) {
-  let info = {};
-  if (fs.existsSync(USERINFOFILE)) {
-    try { info = JSON.parse(fs.readFileSync(USERINFOFILE)); } catch { info = {}; }
-  }
-  info[userID] = { ...info[userID], ...newInfo };
-  fs.writeFileSync(USERINFOFILE, JSON.stringify(info, null, 2));
-}
-
-function extractInfo(text) {
-  let result = {};
-  let nameMatch = text.match(/(?:my name is|I am|I'm|call me)\s+([A-Za-zÀ-ÖØ-öø-ÿ'’\- ]+)/i);
-  if (nameMatch) result.name = nameMatch[1].trim();
-  let ageMatch = text.match(/(?:I am|I'm|age is|My age is|I am|I'm)\s+(\d{1,3})\s*(years? old)?/i);
-  if (ageMatch) result.age = ageMatch[1].trim();
-  return result;
-}
-
-function langCodeToName(code) {
-  const map = {
-    eng: "English", fra: "French", spa: "Spanish", deu: "German",
-    ita: "Italian", por: "Portuguese", zho: "Chinese", rus: "Russian",
-    hin: "Hindi", jpn: "Japanese"
-  };
-  return map[code] || "English";
-}
-
-async function getAIAnswer(question, model, context = [], lang = "eng", userInfo = {}) {
-  let systemText = botPrompt + ` Reply in ${langCodeToName(lang)}.`;
-  if (userInfo.name) systemText += ` The user's name is ${userInfo.name}.`;
-  if (userInfo.age) systemText += ` The user's age is ${userInfo.age}.`;
-  const systemPrompt = { role: "system", content: systemText };
-  const url = `${TOGETHER_API_URL}/chat/completions`;
-  const payload = {
-    model,
-    messages: [systemPrompt, ...context, { role: "user", content: question }],
-    max_tokens: 1024,
-    temperature: 0.7
-  };
-  const headers = {
-    "Authorization": `Bearer ${TOGETHER_API_KEY}`,
-    "Content-Type": "application/json"
-  };
-  const response = await axios.post(url, payload, { headers });
-  return response.data.choices?.[0]?.message?.content;
-}
-
-function heartReact(api, msgid, threadid) {
-  api.setMessageReaction("❤️", msgid, () => {}, true);
-}
-
-module.exports.run = async function({ api, event, args }) {
-  const { threadID, messageID, senderID, body } = event;
-  if (!body) return;
-
-  heartReact(api, messageID, threadID);
-
-  let lang = franc(body, { minLength: 3 }) || "eng";
-
-  let extracted = extractInfo(body);
-  if (Object.keys(extracted).length) {
-    setUserInfo(senderID, extracted);
-  }
-  let userInfo = getUserInfo(senderID);
-
-  if (body.trim().startsWith(".pi")) {
-    let question = body.trim().slice(3).trim();
-    if (!question) return;
-    if (!checkCooldown(senderID, threadID)) return;
-
-    let context = [];
-    try {
-      const aiReply = await getAIAnswer(question, defaultModel, context, lang, userInfo);
-      api.sendMessage(aiReply || "No answer.", threadID, (err, info) => {
-        setContext(threadID, [
-          { role: "user", content: question },
-          { role: "assistant", content: aiReply }
-        ]);
-      });
-    } catch (err) {
-      api.sendMessage("Error. Please try again.", threadID, messageID);
-    }
-    return;
+  // If replying to bot message, treat replied message as input
+  if (event.type === "message_reply" && event.messageReply?.senderID === api.getCurrentUserID()) {
+    userMsg = event.body.trim();
   }
 
-  let context = getContext(threadID);
-  if (context.length === 0) return;
+  if (!userMsg) {
+    return api.sendMessage("❌ Please provide a message to chat with AI.", threadID, event.messageID);
+  }
 
-  if (!checkCooldown(senderID, threadID)) return;
+  // React to user's message with cherry emoji
+  api.setMessageReaction("🍒", event.messageID, () => {}, true);
 
-  let question = body.trim();
+  // Build context prompt
+  const oldContext = getContext(threadID, userID);
+
+  // Detect language for reply
+  const langIso = detectLanguage(userMsg);
+  const replyLang = langs.where("1", langIso)?.name || "English";
+  let systemPrompt = customPrompt + `\nThe user's name is ${userName}. If possible, reply in ${replyLang}.`;
+
+  // Together.xyz API call
+  api.sendMessage("⏳ Thinking...", threadID, event.messageID);
+
   try {
-    const aiReply = await getAIAnswer(question, defaultModel, context, lang, userInfo);
-    api.sendMessage(aiReply || "No answer.", threadID, (err, info) => {
-      setContext(threadID, [
-        ...context,
-        { role: "user", content: question },
-        { role: "assistant", content: aiReply }
-      ]);
-    });
+    const response = await axios.post(
+      "https://api.together.xyz/v1/chat/completions",
+      {
+        model: "togethercomputer/llama-2-7b-chat",
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...oldContext.flatMap(e => [
+            { role: "user", content: e.user },
+            { role: "assistant", content: e.bot }
+          ]),
+          { role: "user", content: userMsg }
+        ]
+      },
+      {
+        headers: {
+          "Authorization": "Bearer tgp_v1_gSGr4xOlJGKdPASnQjLm6LHLx0sr6qmCnROOQFT_aCk",
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    const answer = response.data.choices?.[0]?.message?.content || "⚠️ No response from AI.";
+
+    // Store exchange for future context
+    updateContext(threadID, userID, userMsg, answer);
+
+    api.sendMessage(answer, threadID, event.messageID);
   } catch (err) {
-    api.sendMessage("Error. Please try again.", threadID, messageID);
+    api.sendMessage("❌ Error: Could not get response from AI.\n" + (err.response?.data?.error || err.message), threadID, event.messageID);
+  }
+};
+
+// Prefixless reply support
+module.exports.handleEvent = async function({ api, event, args, Users }) {
+  if (
+    event.type === "message_reply" &&
+    event.messageReply?.senderID === api.getCurrentUserID()
+  ) {
+    module.exports.run({ api, event, args: [event.body], Users });
   }
 };
