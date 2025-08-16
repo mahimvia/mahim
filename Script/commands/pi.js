@@ -1,6 +1,8 @@
 const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
+const franc = require("franc");
+const langs = require("langs");
 
 const CONTEXT_FILE = path.join(__dirname, "cache", "pi_context.json");
 let contextStore = {};
